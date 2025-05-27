@@ -10,9 +10,9 @@ NEIGHBORHOODS = [
     "Rozenknopje", "Oud-Woensel"
 ]
 
-BUS_CAPACITY = 22
+BUS_CAPACITY = 10
 STOP_TIME = 1
-TRIP_INTERVAL = 15
+TRIP_INTERVAL = 5
 SIM_TIME = 960  # minutes (6:00 to 22:00)
 PASSENGER_RATE = 0.2  # Poisson arrival rate per minute per stop
 
@@ -50,8 +50,11 @@ def generate_passengers(env, stop_name, stop_queues):
 
 
 # === Mothership Process ===
-def mothership(env, stop_queues, bus_id):
+def mothership(env, stop_queues, bus_id, shutdown_flag):
     while True:
+        if shutdown_flag["stop"]:
+            break  # Exit loop — kill this bus
+
         onboard = []
 
         for stop in NEIGHBORHOODS:
@@ -76,13 +79,14 @@ def mothership(env, stop_queues, bus_id):
 
 # === Dynamic Bus Launch Scheduler ===
 def bus_scheduler(env, stop_queues):
-    active_buses = set()
+    active_buses = []
 
     def launch_buses(num, label_prefix):
         for i in range(num):
+            shutdown_flag = {"stop": False}
             bus_name = f"{label_prefix}-{i+1}"
-            proc = env.process(mothership(env, stop_queues, bus_name))
-            active_buses.add(proc)
+            proc = env.process(mothership(env, stop_queues, bus_name, shutdown_flag))
+            active_buses.append((proc, shutdown_flag))
 
     # Initially off-peak
     launch_buses(4, "OffPeak")
@@ -91,11 +95,14 @@ def bus_scheduler(env, stop_queues):
 
     # 07:00–10:00 Peak → 6 buses
     launch_buses(2, "Peak-AM")  # Add 2 more to make 6 total
-    yield env.timeout(120)  # 07:00–09:00
-    yield env.timeout(60)   # 09:00–10:00
+    yield env.timeout(180)  # 07:00–10:00
 
-    # Drop to 4 buses again (we let other buses finish but don’t relaunch them)
-    # Nothing to do here since they finish naturally
+    # At 10:00, mark 2 buses for shutdown
+    removed = 0
+    for proc, flag in active_buses:
+        if removed < 2:
+            flag["stop"] = True
+            removed += 1
 
     yield env.timeout(240)  # 10:00–16:00 (off-peak)
 

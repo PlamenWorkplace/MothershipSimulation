@@ -1,0 +1,50 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environment
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+*.egg-info/
+
+# Logs and profiling
+*.log
+*.out
+*.err
+*.profile
+
+# Jupyter notebook checkpoints (if you use notebooks for analysis)
+.ipynb_checkpoints/
+
+# Data / simulation outputs (optional, depending on your project)
+*.csv
+*.json
+*.txt
+results/
+output/
+plots/
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Unit test cache
+.pytest_cache/
+coverage/
+htmlcov/
+
+# SimPy-specific (nothing unique needed — standard Python ignores cover it)
+
+# Personal customization (optional)
+*.bak
+*.tmp
