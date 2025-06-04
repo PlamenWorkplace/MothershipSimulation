@@ -88,27 +88,43 @@ missed_passengers = []
 all_packages = []
 delivered_packages = []
 missed_packages = []
+bus_states = defaultdict(list)
 
-# Bus utilization tracking
-bus_utilization_data = []
-bus_states = defaultdict(list)  # Track empty/full states
+# === Demand weighting by time of day ===
+hourly_demand_percent = {
+    "06:00–07:00": 0.03,
+    "07:00–08:00": 0.09,
+    "08:00–09:00": 0.11,
+    "09:00–10:00": 0.07,
+    "10:00–11:00": 0.05,
+    "11:00–12:00": 0.05,
+    "12:00–13:00": 0.06,
+    "13:00–14:00": 0.06,
+    "14:00–15:00": 0.05,
+    "15:00–16:00": 0.06,
+    "16:00–17:00": 0.08,
+    "17:00–18:00": 0.10,
+    "18:00–19:00": 0.06,
+    "19:00–20:00": 0.04,
+    "20:00–21:00": 0.025,
+    "21:00–22:00": 0.015,
+}
 
+minute_weights = []
+for _, percent in hourly_demand_percent.items():
+    minute_weights.extend([percent / 60] * 60)
+
+assert len(minute_weights) == 960, f"Expected 960 minutes, got {len(minute_weights)}"
+
+# === Arrival Rate Function ===
 def get_passenger_rate(time, neighborhood):
-    """Get passenger arrival rate based on time and neighborhood characteristics"""
-    # Total expected passengers for this neighborhood for the entire day
-    daily_passengers = NEIGHBORHOOD_DATA[neighborhood]["expected_passengers"]
-    
-    # Distribute across the 16-hour service period (960 minutes)
-    # Peak hours get 60% of daily demand, off-peak gets 40%
-    peak_minutes = 240  # 4 hours of peak time (07:00-09:00, 16:00-19:00)
-    offpeak_minutes = 720  # 12 hours of off-peak time
-    
-    if 60 <= time < 180 or 600 <= time < 720:  # Peak hours
-        # 60% of daily passengers distributed over 240 peak minutes
-        return (daily_passengers * 0.6) / peak_minutes
-    else:  # Off-peak hours
-        # 40% of daily passengers distributed over 720 off-peak minutes
-        return (daily_passengers * 0.4) / offpeak_minutes
+    """Adjusted per-minute rate using demand weights"""
+    if time >= 960:
+        return 0
+    base_daily_demand = NEIGHBORHOOD_DATA[neighborhood]["expected_passengers"]
+    return base_daily_demand * minute_weights[int(time)]
+
+
 
 def get_package_rate(neighborhood):
     """Get package generation rate based on neighborhood population"""
