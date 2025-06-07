@@ -1,8 +1,6 @@
 import simpy
 import random
-import numpy as np
 from collections import deque, defaultdict
-import math
 
 # === Parameters ===
 NEIGHBORHOODS = [
@@ -11,8 +9,6 @@ NEIGHBORHOODS = [
     "Rozenknopje", "Oud-Woensel"
 ]
 
-# Target daily demand: 817 passengers (20% of 4083 expected from CSV)
-DAILY_TARGET_PASSENGERS = 817
 
 # Neighborhood data from demand estimation - using proportional distribution of 817 target
 NEIGHBORHOOD_DATA = {
@@ -77,8 +73,6 @@ ROBOT_CAPACITY = 10  # packages per robot
 ROBOT_SPEED = 3  # minutes per delivery
 PICKUP_WAIT_TIME = (5, 15)  # min, max wait time for robot pickup
 
-PEAK_HOURS = [(60, 180), (600, 720)]  # 07:00–10:00 and 16:00–19:00
-
 # === Global tracking variables ===
 stop_queues = {stop: deque() for stop in NEIGHBORHOODS}
 package_queues = {stop: deque() for stop in NEIGHBORHOODS}
@@ -116,6 +110,7 @@ for _, percent in hourly_demand_percent.items():
 
 assert len(minute_weights) == 960, f"Expected 960 minutes, got {len(minute_weights)}"
 
+
 # === Arrival Rate Function ===
 def get_passenger_rate(time, neighborhood):
     """Adjusted per-minute rate using demand weights"""
@@ -125,13 +120,13 @@ def get_passenger_rate(time, neighborhood):
     return base_daily_demand * minute_weights[int(time)]
 
 
-
 def get_package_rate(neighborhood):
     """Get package generation rate based on neighborhood population"""
     inhabitants = NEIGHBORHOOD_DATA[neighborhood]["inhabitants"]
     total_inhabitants = sum(data["inhabitants"] for data in NEIGHBORHOOD_DATA.values())
     neighborhood_share = inhabitants / total_inhabitants
     return (DAILY_PACKAGES * neighborhood_share) / SIM_TIME
+
 
 def generate_passengers(env, stop_name):
     """Generate passengers with realistic demand patterns"""
@@ -166,6 +161,7 @@ def generate_passengers(env, stop_name):
         stop_queues[stop_name].append(passenger)
         all_passengers.append(passenger)
 
+
 def generate_packages(env, stop_name):
     """Generate packages for delivery"""
     package_rate = get_package_rate(stop_name)
@@ -190,6 +186,7 @@ def generate_packages(env, stop_name):
         }
         package_queues[stop_name].append(package)
         all_packages.append(package)
+
 
 def mothership_bus(env, bus_id, route_order):
     """Enhanced bus process with realistic travel times and utilization tracking"""
@@ -243,6 +240,7 @@ def mothership_bus(env, bus_id, route_order):
         # Wait before starting next trip
         yield env.timeout(TRIP_INTERVAL)
 
+
 def delivery_robot(env, robot_id, origin_stop):
     """Robot delivery process with pickup by mothership"""
     packages_carried = []
@@ -281,6 +279,7 @@ def delivery_robot(env, robot_id, origin_stop):
     pickup_wait = random.uniform(*PICKUP_WAIT_TIME)
     yield env.timeout(pickup_wait)
 
+
 def robot_scheduler(env):
     """Schedule robot deployments based on package demand"""
     robot_counter = 0
@@ -295,6 +294,7 @@ def robot_scheduler(env):
                 # Deploy robot
                 robot_counter += 1
                 env.process(delivery_robot(env, f"Robot-{robot_counter}", stop))
+
 
 def bus_scheduler(env):
     """Dynamic bus scheduling with different routes - more buses for better service"""
@@ -332,28 +332,6 @@ def bus_scheduler(env):
     launch_buses(6, "Peak-PM")
     yield env.timeout(180)  # 16:00–19:00
 
-# === Simulation Setup ===
-env = simpy.Environment()
-
-# Start passenger generators
-for stop in NEIGHBORHOODS:
-    env.process(generate_passengers(env, stop))
-    env.process(generate_packages(env, stop))
-
-# Start schedulers
-env.process(bus_scheduler(env))
-env.process(robot_scheduler(env))
-
-# Run simulation
-env.run(until=SIM_TIME)
-
-# === Post-processing ===
-# Add missed passengers and packages
-for queue in stop_queues.values():
-    missed_passengers.extend(queue)
-
-for queue in package_queues.values():
-    missed_packages.extend(queue)
 
 # === Analysis Functions ===
 def analyze_bus_utilization():
@@ -382,6 +360,7 @@ def analyze_bus_utilization():
         'average_utilization': avg_utilization * 100,
         'can_board_probability': ((total_observations - full_count) / total_observations) * 100
     }
+
 
 def print_comprehensive_report():
     """Print detailed simulation results"""
@@ -456,6 +435,30 @@ def print_comprehensive_report():
         missed = len([p for p in missed_packages if p['origin'] == stop])
         
         print(f"{stop:<25} | {created:<8} | {delivered:<10} | {missed:<8}")
+
+
+# === Simulation Setup ===
+env = simpy.Environment()
+
+# Start passenger generators
+for stop in NEIGHBORHOODS:
+    env.process(generate_passengers(env, stop))
+    env.process(generate_packages(env, stop))
+
+# Start schedulers
+env.process(bus_scheduler(env))
+env.process(robot_scheduler(env))
+
+# Run simulation
+env.run(until=SIM_TIME)
+
+# === Post-processing ===
+# Add missed passengers and packages
+for queue in stop_queues.values():
+    missed_passengers.extend(queue)
+
+for queue in package_queues.values():
+    missed_packages.extend(queue)
 
 # Run the comprehensive analysis
 print_comprehensive_report()
