@@ -186,7 +186,7 @@ def get_robots(env, route, direction):
 
 
 def generate_packages(env):
-    all_stops = list({stop["stop"] for stop in RED_ROUTE + BLUE_ROUTE})
+    all_stops = list({stop["stop"] for stop in RED_ROUTE + BLUE_ROUTE if stop["stop"] != "Broekakkerseweg 26"})
 
     while True:
         arrival_time = env.now
@@ -248,17 +248,16 @@ def mothership_bus(env, bus_id, route, run_duration):
                         env.process(deliver_package(env, robot, route, current_stop))
 
                 # Stop time
-                if current_stop == "Broekakkerseweg 26" or current_stop == "Eindhoven, Wijnpeerstraat":
+                if current_stop == "Broekakkerseweg 26" or current_stop == "Eindhoven, Wijnpeerstraat": # end stop
                     if last_trip and "Broekakkerseweg 26":
                         return
                     yield env.timeout(random.expovariate(TRIP_INTERVAL))  # TRIP_INTERVAL between 5 and 10
                 else:
                     yield env.timeout(random.expovariate(STOP_TIME))  # STOP_TIME between 0.5 and 1
 
-                # Pick-up passengers
                 picked_up = 0
-
                 if not last_trip:
+                    # Pick-up passengers
                     queue = stop_queues[current_stop]
                     while queue and len(onboard_passengers) < BUS_PASSENGER_CAPACITY:
                         passenger = queue.popleft()
@@ -302,6 +301,7 @@ def mothership_bus(env, bus_id, route, run_duration):
                     yield req
                     ROBOTS_IN_WAREHOUSE = ROBOTS_IN_WAREHOUSE + len(onboard_robots)
 
+
             # Reverse direction for red route
             if route is RED_ROUTE:
                 if direction == "forward":
@@ -344,7 +344,7 @@ def mothership_scheduler(env):
     launch_buses(1, "OffPeak-AM", 240, "blue")
     yield env.timeout(540)  # 07:00–16:00
 
-    # # Evening peak (12 buses)
+    # # Evening peak
     launch_buses(2, "OffPeak-AM", 180, "red")
     launch_buses(1, "OffPeak-AM", 180, "blue")
     yield env.timeout(180)  # 16:00–19:00
@@ -408,10 +408,11 @@ def print_comprehensive_report():
 
     # Package Delivery Analysis
     print("\n--- PACKAGE DELIVERY ---")
+    print(f"Created packages:             {len(all_packages)}")
     delivered_packages = [p for p in all_packages if p["status"] == "delivered"]
-    print(f"Total packages delivered:     {len(delivered_packages)}")
-    still_in_warehouse = [p for p in all_packages if p["status"] == "waiting_in_warehouse"]
-    print(f"Packages still in warehouse:  {len(still_in_warehouse)}")
+    print(f"Delivered packages:           {len(delivered_packages)}")
+    remained = [p for p in all_packages if p["status"] == "onboard" or p["status"] == "waiting_in_warehouse"]
+    print(f"Packages left in warehouse:   {len(remained)}")
 
     if delivered_packages:
         delivery_times = [p['total_time'] for p in delivered_packages if 'total_time' in p]
@@ -423,8 +424,8 @@ def print_comprehensive_report():
     print(f"{'Neighborhood':<31} | {'Created':<8} | {'Served':<8} | {'Avg Wait':<10}")
     print("-" * 75)
 
-    ALL_UNIQUE_BUS_STOPS = set([stop["stop"] for stop in BLUE_ROUTE] + [stop["stop"] for stop in RED_ROUTE])
-    for stop in ALL_UNIQUE_BUS_STOPS:
+    ALL_BUS_STOPS = set([stop["stop"] for stop in BLUE_ROUTE] + [stop["stop"] for stop in RED_ROUTE])
+    for stop in ALL_BUS_STOPS:
         created = len([p for p in all_passengers if p['origin'] == stop])
         served = len([p for p in served_passengers if p['origin'] == stop])
 
@@ -438,10 +439,10 @@ def print_comprehensive_report():
     print(f"{'Neighborhood':<31} | {'Created':<8} | {'Delivered':<10} | {'Missed':<8}")
     print("-" * 60)
 
-    for stop in ALL_UNIQUE_BUS_STOPS:
+    for stop in ALL_BUS_STOPS:
         created = len([p for p in all_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
         delivered = len([p for p in delivered_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
-        missed = len([p for p in missed_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
+        missed = len([p for p in remained if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
 
         print(f"{stop:<31} | {created:<8} | {delivered:<10} | {missed:<8}")
 
