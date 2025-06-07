@@ -33,24 +33,25 @@ RED_ROUTE = [
 
 RED_BUS_STOPS = [stop["stop"] for stop in RED_ROUTE]
 
-BUS_CAPACITY = 22  # Updated from demand estimation
+BUS_PASSENGER_CAPACITY = 22  # Updated from demand estimation
+BUS_ROBOT_CAPACITY = 12
+ROBOTS_IN_WAREHOUSE = 72
 SIM_TIME = 960  # minutes (6:00 to 22:00)
-
-# Package delivery parameters
-DAILY_PACKAGES = 248  # From demand estimation
+STOP_TIME = 0.5
+TRIP_INTERVAL = 5  # Reduced from 15 to increase frequency
 ROBOT_CAPACITY = 10  # packages per robot
-ROBOT_SPEED = 3  # minutes per delivery
-PICKUP_WAIT_TIME = (5, 15)  # min, max wait time for robot pickup
+ROBOT_SPEED = 5  # minutes per delivery
+
 
 # === Global tracking variables ===
 stop_queues_red_route_forward = {stop["stop"]: deque() for stop in RED_ROUTE}
 stop_queues_red_route_backward = {stop["stop"]: deque() for stop in RED_ROUTE}
 stop_queues_blue_route = {stop["stop"]: deque() for stop in BLUE_ROUTE}
-# package_queues = {stop: deque() for stop in NEIGHBORHOODS}
+robot_queues_red_route_backward = {stop["stop"]: deque() for stop in RED_ROUTE}
+robot_queues_blue_route = {stop["stop"]: deque() for stop in BLUE_ROUTE}
 all_passengers = []
 served_passengers = []
 all_packages = []
-delivered_packages = []
 missed_packages = []
 bus_states = defaultdict(list)
 
@@ -84,7 +85,7 @@ assert len(minute_weights) == 960, f"Expected 960 minutes, got {len(minute_weigh
 # === Arrival Rate Function ===
 def get_passenger_rate(time, stop_name, route):
     """Adjusted per-minute rate using demand weights"""
-    if time >= 960:
+    if time >= SIM_TIME:
         return 0
 
     # Find the stop dict in the route that matches stop_name
@@ -94,14 +95,6 @@ def get_passenger_rate(time, stop_name, route):
 
     base_daily_demand = stop_info.get("expected_daily_passengers", 0)
     return base_daily_demand * minute_weights[int(time)]
-
-
-# def get_package_rate(neighborhood):
-#     """Get package generation rate based on neighborhood population"""
-#     inhabitants = NEIGHBORHOOD_DATA[neighborhood]["inhabitants"]
-#     total_inhabitants = sum(data["inhabitants"] for data in NEIGHBORHOOD_DATA.values())
-#     neighborhood_share = inhabitants / total_inhabitants
-#     return (DAILY_PACKAGES * neighborhood_share) / SIM_TIME
 
 
 def generate_passengers(env, stop_name, route, direction=None):
@@ -123,9 +116,8 @@ def generate_passengers(env, stop_name, route, direction=None):
         destination = random.choices(possible_destinations, weights=weights)[0]
         arrival_time = env.now
 
-        # Passengers arriving after 900 minutes are skipped
-        if arrival_time > 900:
-            continue
+        if arrival_time > SIM_TIME - 60:
+            break
 
         passenger = {
             "origin": stop_name,
@@ -162,34 +154,70 @@ def get_stop_queues(route, direction):
         raise ValueError("Unknown route")
 
 
-# def generate_packages(env, stop_name):
-#     """Generate packages for delivery"""
-#     package_rate = get_package_rate(stop_name)
-#
-#     while True:
-#         if package_rate > 0:
-#             yield env.timeout(random.expovariate(package_rate))
-#         else:
-#             yield env.timeout(10)  # Check every 10 minutes
-#             continue
-#
-#         # Random destination weighted by population
-#         destinations = [s for s in NEIGHBORHOODS if s != stop_name]
-#         weights = [NEIGHBORHOOD_DATA[dest]["inhabitants"] for dest in destinations]
-#         destination = random.choices(destinations, weights=weights)[0]
-#
-#         package = {
-#             "origin": stop_name,
-#             "destination": destination,
-#             "creation_time": env.now,
-#             "id": len(all_packages)
-#         }
-#         package_queues[stop_name].append(package)
-#         all_packages.append(package)
+def get_robots(env, route, direction):
+    global ROBOTS_IN_WAREHOUSE
+
+    if route == RED_ROUTE and direction == "backward":
+        return []
+
+    route_colour = "red" if route is RED_ROUTE else "blue"
+    result = []
+
+    with package_lock.request() as req:
+        yield req
+
+        for pkg in all_packages:
+            if (
+                    pkg["status"] == "waiting_in_warehouse"
+                    and pkg["route_colour"] == route_colour
+                    and pkg["arrival_time"] <= env.now
+            ):
+                if ROBOTS_IN_WAREHOUSE <= 0:
+                    break
+
+                pkg["status"] = "onboard"
+                result.append(pkg)
+                ROBOTS_IN_WAREHOUSE -= 1
+
+                if len(result) >= BUS_ROBOT_CAPACITY:
+                    break
+
+    return result
+
+
+def generate_packages(env):
+    all_stops = list({stop["stop"] for stop in RED_ROUTE + BLUE_ROUTE})
+
+    while True:
+        arrival_time = env.now
+
+        if arrival_time > SIM_TIME - 180:
+            break
+
+        delivery_stop = random.choice(all_stops)
+        # Determine which route the delivery stop is on
+        if any(stop["stop"] == delivery_stop for stop in RED_ROUTE):
+            route_colour = "red"
+        else:
+            route_colour = "blue"
+
+        package = {
+            "delivery_stop": delivery_stop,
+            "route_colour": route_colour,
+            "arrival_time": arrival_time,
+            "delivery_time": None,
+            "status": "waiting_in_warehouse",
+            "onboard_bus_id": None
+        }
+
+        all_packages.append(package)
+
+        yield env.timeout(random.expovariate(0.25))
 
 
 def mothership_bus(env, bus_id, route, run_duration):
     """Enhanced bus process with realistic travel times and utilization tracking"""
+    global ROBOTS_IN_WAREHOUSE
     onboard_passengers = []
     end_time = env.now + run_duration
 
@@ -200,6 +228,7 @@ def mothership_bus(env, bus_id, route, run_duration):
     try:
         while True:
             stop_queues = get_stop_queues(route, direction)
+            onboard_robots = yield from get_robots(env, route, direction)
             for i, current_stop in enumerate(stops):
                 if env.now >= end_time:
                     last_trip = True
@@ -207,45 +236,71 @@ def mothership_bus(env, bus_id, route, run_duration):
                 # Drop-off passengers
                 initial_onboard = len(onboard_passengers)
                 drop_offs = [p for p in onboard_passengers if p['destination'] == current_stop]
+                drop_offs_robots = [p for p in onboard_robots if p['delivery_stop'] == current_stop]
                 for passenger in drop_offs:
                     onboard_passengers.remove(passenger)
                     passenger['dropoff_time'] = env.now
                     passenger['travel_time'] = passenger['dropoff_time'] - passenger['pickup_time']
                     served_passengers.append(passenger)
+                if not last_trip:
+                    for robot in drop_offs_robots:
+                        onboard_robots.remove(robot)
+                        env.process(deliver_package(env, robot, route, current_stop))
 
                 # Stop time
                 if current_stop == "Broekakkerseweg 26" or current_stop == "Eindhoven, Wijnpeerstraat":
-                    if last_trip:
+                    if last_trip and "Broekakkerseweg 26":
                         return
-                    yield env.timeout(random.uniform(5, 10))  # TRIP_INTERVAL between 5 and 10
+                    yield env.timeout(random.expovariate(TRIP_INTERVAL))  # TRIP_INTERVAL between 5 and 10
                 else:
-                    yield env.timeout(random.uniform(0.5, 1))  # STOP_TIME between 0.5 and 1
+                    yield env.timeout(random.expovariate(STOP_TIME))  # STOP_TIME between 0.5 and 1
 
                 # Pick-up passengers
                 picked_up = 0
+
                 if not last_trip:
                     queue = stop_queues[current_stop]
-                    while queue and len(onboard_passengers) < BUS_CAPACITY:
+                    while queue and len(onboard_passengers) < BUS_PASSENGER_CAPACITY:
                         passenger = queue.popleft()
                         passenger['pickup_time'] = env.now
                         passenger['wait_time'] = passenger['pickup_time'] - passenger['arrival_time']
                         onboard_passengers.append(passenger)
                         picked_up += 1
 
+                    # Pick up robots
+                    if route != RED_ROUTE or direction == "backward":
+                        if route == BLUE_ROUTE:
+                            queue = robot_queues_blue_route[current_stop]
+                        else:
+                            queue = robot_queues_red_route_backward[current_stop]
+
+                        while queue and len(onboard_robots) < BUS_ROBOT_CAPACITY:
+                            robot = queue.popleft()
+                            robot['pickup_time'] = env.now
+                            onboard_robots.append(robot)
+
+
                 # Record bus state
                 bus_states[bus_id].append({
                     'time': env.now,
                     'stop': current_stop,
                     'passengers': len(onboard_passengers),
-                    'capacity': BUS_CAPACITY,
-                    'utilization': len(onboard_passengers) / BUS_CAPACITY,
+                    'capacity': BUS_PASSENGER_CAPACITY,
+                    'utilization': len(onboard_passengers) / BUS_PASSENGER_CAPACITY,
                     'picked_up': picked_up,
-                    'dropped_off': initial_onboard - len(onboard_passengers) + len(drop_offs)
+                    'dropped_off': initial_onboard - len(onboard_passengers) + len(drop_offs),
+                    'robots': len(onboard_robots)
                 })
 
                 # Travel to next stop (if not last stop)
                 travel_time = route[i]['travel_time_to_next']
                 yield env.timeout(travel_time)
+
+            # Return robots to warehouse
+            if route != RED_ROUTE or direction == "backward":
+                with package_lock.request() as req:
+                    yield req
+                    ROBOTS_IN_WAREHOUSE = ROBOTS_IN_WAREHOUSE + len(onboard_robots)
 
             # Reverse direction for red route
             if route is RED_ROUTE:
@@ -260,59 +315,15 @@ def mothership_bus(env, bus_id, route, run_duration):
         print(f"{bus_id} interrupted at {env.now}")
 
 
-# def delivery_robot(env, robot_id, origin_stop):
-#     """Robot delivery process with pickup by mothership"""
-#     packages_carried = []
-#
-#     # Load packages at origin
-#     queue = package_queues[origin_stop]
-#     while queue and len(packages_carried) < ROBOT_CAPACITY:
-#         package = queue.popleft()
-#         package['pickup_time'] = env.now
-#         packages_carried.append(package)
-#
-#     if not packages_carried:
-#         return  # No packages to deliver
-#
-#     # Group packages by destination
-#     destinations = defaultdict(list)
-#     for package in packages_carried:
-#         destinations[package['destination']].append(package)
-#
-#     # Deliver packages
-#     current_location = origin_stop
-#     for dest, dest_packages in destinations.items():
-#         # Travel to destination
-#         travel_time = TRAVEL_TIMES[current_location][dest]
-#         yield env.timeout(travel_time)
-#         current_location = dest
-#
-#         # Deliver packages
-#         for package in dest_packages:
-#             yield env.timeout(ROBOT_SPEED)
-#             package['delivery_time'] = env.now
-#             package['total_time'] = package['delivery_time'] - package['creation_time']
-#             delivered_packages.append(package)
-#
-#     # Wait for pickup by mothership
-#     pickup_wait = random.uniform(*PICKUP_WAIT_TIME)
-#     yield env.timeout(pickup_wait)
-
-
-# def robot_scheduler(env):
-#     """Schedule robot deployments based on package demand"""
-#     robot_counter = 0
-#
-#     while True:
-#         # Check package queues every 30 minutes
-#         yield env.timeout(30)
-#
-#         for stop in NEIGHBORHOODS:
-#             queue_length = len(package_queues[stop])
-#             if queue_length >= ROBOT_CAPACITY:
-#                 # Deploy robot
-#                 robot_counter += 1
-#                 env.process(delivery_robot(env, f"Robot-{robot_counter}", stop))
+def deliver_package(env, robot, route, stop_name):
+    yield env.timeout(random.expovariate(ROBOT_SPEED)) # Time to delivery
+    robot['delivery_time'] = env.now
+    robot['status'] = "delivered"
+    yield env.timeout(random.expovariate(ROBOT_SPEED)) # Time to return to bus station
+    if route == RED_ROUTE:
+        robot_queues_red_route_backward[stop_name].append(robot)
+    elif route == BLUE_ROUTE:
+        robot_queues_blue_route[stop_name].append(robot)
 
 
 def launch_buses(num, label_prefix, run_duration, route_colour):
@@ -322,7 +333,7 @@ def launch_buses(num, label_prefix, run_duration, route_colour):
         env.process(mothership_bus(env, bus_name, route, run_duration))
 
 
-def bus_scheduler(env):
+def mothership_scheduler(env):
     # Initially 4 buses that run all day
     launch_buses(2, "OffPeak-AM", SIM_TIME + 60, "red")
     launch_buses(1, "OffPeak-AM", SIM_TIME + 60, "blue")
@@ -395,49 +406,50 @@ def print_comprehensive_report():
         print(f"Time buses full:              {util_stats['percent_full']:.1f}%")
         print(f"Probability passenger can board: {util_stats['can_board_probability']:.1f}%")
 
-    # # Package Delivery Analysis
-    # print("\n--- PACKAGE DELIVERY ---")
-    # print(f"Total packages created:       {len(all_packages)}")
-    # print(f"Total packages delivered:     {len(delivered_packages)}")
-    # print(f"Total packages missed:        {len(missed_packages)}")
-    # if all_packages:
-    #     print(f"Delivery rate:                {len(delivered_packages)/len(all_packages)*100:.1f}%")
-    #
-    # if delivered_packages:
-    #     delivery_times = [p['total_time'] for p in delivered_packages if 'total_time' in p]
-    #     if delivery_times:
-    #         print(f"Average delivery time:        {sum(delivery_times)/len(delivery_times):.2f} minutes")
-    #
-    # # Per-Neighborhood Analysis
-    # print("\n--- PER-NEIGHBORHOOD PASSENGER ANALYSIS ---")
-    # print(f"{'Neighborhood':<25} | {'Created':<8} | {'Served':<8} | {'Missed':<8} | {'Avg Wait':<10}")
-    # print("-" * 75)
-    #
-    # for stop in NEIGHBORHOODS:
-    #     created = len([p for p in all_passengers if p['origin'] == stop])
-    #     served = len([p for p in served_passengers if p['origin'] == stop])
-    #     missed = len([p for p in missed_passengers if p['origin'] == stop])
-    #
-    #     wait_times = [p['wait_time'] for p in served_passengers
-    #                   if p['origin'] == stop and 'wait_time' in p]
-    #     avg_wait = sum(wait_times) / len(wait_times) if wait_times else 0
-    #
-    #     print(f"{stop:<25} | {created:<8} | {served:<8} | {missed:<8} | {avg_wait:<10.2f}")
-    #
-    # print("\n--- PER-NEIGHBORHOOD PACKAGE ANALYSIS ---")
-    # print(f"{'Neighborhood':<25} | {'Created':<8} | {'Delivered':<10} | {'Missed':<8}")
-    # print("-" * 60)
-    #
-    # for stop in NEIGHBORHOODS:
-    #     created = len([p for p in all_packages if p['origin'] == stop])
-    #     delivered = len([p for p in delivered_packages if p['origin'] == stop])
-    #     missed = len([p for p in missed_packages if p['origin'] == stop])
-    #
-    #     print(f"{stop:<25} | {created:<8} | {delivered:<10} | {missed:<8}")
+    # Package Delivery Analysis
+    print("\n--- PACKAGE DELIVERY ---")
+    delivered_packages = [p for p in all_packages if p["status"] == "delivered"]
+    print(f"Total packages delivered:     {len(delivered_packages)}")
+    still_in_warehouse = [p for p in all_packages if p["status"] == "waiting_in_warehouse"]
+    print(f"Packages still in warehouse:  {len(still_in_warehouse)}")
+
+    if delivered_packages:
+        delivery_times = [p['total_time'] for p in delivered_packages if 'total_time' in p]
+        if delivery_times:
+            print(f"Average delivery time:        {sum(delivery_times)/len(delivery_times):.2f} minutes")
+
+    # Per-Neighborhood Analysis
+    print("\n--- PER-NEIGHBORHOOD PASSENGER ANALYSIS ---")
+    print(f"{'Neighborhood':<31} | {'Created':<8} | {'Served':<8} | {'Avg Wait':<10}")
+    print("-" * 75)
+
+    ALL_UNIQUE_BUS_STOPS = set([stop["stop"] for stop in BLUE_ROUTE] + [stop["stop"] for stop in RED_ROUTE])
+    for stop in ALL_UNIQUE_BUS_STOPS:
+        created = len([p for p in all_passengers if p['origin'] == stop])
+        served = len([p for p in served_passengers if p['origin'] == stop])
+
+        wait_times = [p['wait_time'] for p in served_passengers
+                      if p['origin'] == stop and 'wait_time' in p]
+        avg_wait = sum(wait_times) / len(wait_times) if wait_times else 0
+
+        print(f"{stop:<31} | {created:<8} | {served:<8} | {avg_wait:<10.2f}")
+
+    print("\n--- PER-NEIGHBORHOOD PACKAGE ANALYSIS ---")
+    print(f"{'Neighborhood':<31} | {'Created':<8} | {'Delivered':<10} | {'Missed':<8}")
+    print("-" * 60)
+
+    for stop in ALL_UNIQUE_BUS_STOPS:
+        created = len([p for p in all_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
+        delivered = len([p for p in delivered_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
+        missed = len([p for p in missed_packages if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
+
+        print(f"{stop:<31} | {created:<8} | {delivered:<10} | {missed:<8}")
 
 
 # === Simulation Setup ===
 env = simpy.Environment()
+package_lock = simpy.Resource(env, capacity=1)
+
 
 # Start passenger generators
 for stop in BLUE_BUS_STOPS:
@@ -446,18 +458,19 @@ for stop in RED_BUS_STOPS:
     env.process(generate_passengers(env, stop, RED_ROUTE, "forward"))
     env.process(generate_passengers(env, stop, RED_ROUTE, "backward"))
 
+env.process(generate_packages(env))
 
 # Start schedulers
-env.process(bus_scheduler(env))
-# env.process(robot_scheduler(env))
+env.process(mothership_scheduler(env))
 
 # Run simulation
 env.run(until=SIM_TIME + 60) # One extra hour for buses to drop off the remaining passengers
 
 # === Post-processing ===
 # Add missed passengers and packages
-# for queue in package_queues.values():
-#     missed_packages.extend(queue)
+package_queues = {**robot_queues_red_route_backward, **robot_queues_blue_route}
+for queue in package_queues.values():
+    missed_packages.extend(queue)
 
 # Run the comprehensive analysis
 print_comprehensive_report()
