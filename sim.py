@@ -41,7 +41,7 @@ STOP_TIME = 0.5
 TRIP_INTERVAL = 5  # Reduced from 15 to increase frequency
 ROBOT_CAPACITY = 10  # packages per robot
 ROBOT_SPEED = 5  # minutes per delivery
-
+CHANCE_FOR_DELIVERY = 0.8
 
 # === Global tracking variables ===
 stop_queues_red_route_forward = {stop["stop"]: deque() for stop in RED_ROUTE}
@@ -250,7 +250,7 @@ def mothership_bus(env, bus_id, route, run_duration):
                 # Stop time
                 if current_stop == "Broekakkerseweg 26" or current_stop == "Eindhoven, Wijnpeerstraat": # end stop
                     if last_trip and "Broekakkerseweg 26":
-                        return
+                        break
                     yield env.timeout(random.expovariate(TRIP_INTERVAL))  # TRIP_INTERVAL between 5 and 10
                 else:
                     yield env.timeout(random.expovariate(STOP_TIME))  # STOP_TIME between 0.5 and 1
@@ -299,8 +299,13 @@ def mothership_bus(env, bus_id, route, run_duration):
             if route != RED_ROUTE or direction == "backward":
                 with package_lock.request() as req:
                     yield req
+                    for robot in onboard_robots:
+                        if robot['status'] == "onboard":
+                            robot['status'] = "waiting_in_warehouse"
                     ROBOTS_IN_WAREHOUSE = ROBOTS_IN_WAREHOUSE + len(onboard_robots)
 
+            if last_trip and "Broekakkerseweg 26":
+                break
 
             # Reverse direction for red route
             if route is RED_ROUTE:
@@ -317,8 +322,10 @@ def mothership_bus(env, bus_id, route, run_duration):
 
 def deliver_package(env, robot, route, stop_name):
     yield env.timeout(random.expovariate(ROBOT_SPEED)) # Time to delivery
-    robot['delivery_time'] = env.now
-    robot['status'] = "delivered"
+    if random.random() < 0.8:
+        robot['delivery_time'] = env.now
+        robot['status'] = "delivered"
+    # else: status remains unchanged
     yield env.timeout(random.expovariate(ROBOT_SPEED)) # Time to return to bus station
     if route == RED_ROUTE:
         robot_queues_red_route_backward[stop_name].append(robot)
