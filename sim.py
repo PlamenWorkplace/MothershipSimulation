@@ -43,6 +43,13 @@ ROBOT_CAPACITY = 10  # packages per robot
 ROBOT_SPEED = 5  # minutes per delivery
 CHANCE_FOR_DELIVERY = 0.8
 
+# Financial parameters
+COST_PER_BUS_PER_MINUTE = 0.40     # fuel, maintenance, driver
+COST_PER_ROBOT_DELIVERY = 0.20     # electricity, maintenance
+COST_FIXED_OVERHEAD = 100          # garage, coordination center, per day
+REVENUE_PER_PASSENGER = 1.00       # average fare per trip
+REVENUE_PER_PACKAGE = 4.00
+
 # === Global tracking variables ===
 stop_queues_red_route_forward = {stop["stop"]: deque() for stop in RED_ROUTE}
 stop_queues_red_route_backward = {stop["stop"]: deque() for stop in RED_ROUTE}
@@ -354,91 +361,7 @@ def mothership_scheduler(env):
     # # Evening peak
     launch_buses(2, "OffPeak-AM", 180, "red")
     launch_buses(1, "OffPeak-AM", 180, "blue")
-    yield env.timeout(180)  # 16:00–19:00
-
-def bus_dispatcher(env, route, stop_queues, label_prefix, route_colour, capacity, schedule, max_buses):
-    bus_id = 0
-    active_buses = 0
-    while bus_id < max_buses:
-        current_hour = int(env.now // 60)
-        interval = schedule.get(current_hour, 15)
-
-        total_waiting = sum(len(q) for q in stop_queues.values())
-
-        if total_waiting >= capacity // 2:
-            bus_name = f"{label_prefix}-{bus_id}"
-            proc = env.process(mothership_bus(env, bus_name, route, SIM_TIME + 60))
-            register_bus_process(bus_name, proc)  # Register here
-            bus_id += 1
-            active_buses += 1
-            yield env.timeout(interval)
-        else:
-            yield env.timeout(1)
-
-
-# === Dynamic Bus Reassignment Manager ===
-active_bus_processes = {}
-
-def register_bus_process(bus_name, process):
-    active_bus_processes[bus_name] = process
-
-def bus_reassignment_manager(env, max_buses=6):
-    check_interval = 15  # minutes
-    cooldown_buses = set()
-
-    while env.now < SIM_TIME:
-        yield env.timeout(check_interval)
-
-        # 1. Calculate average utilization per bus (last 30 min)
-        utilization = {}
-        for bus_id, records in bus_states.items():
-            recent = [r for r in records if env.now - r['time'] <= 30]
-            if recent:
-                avg_util = sum(r['utilization'] for r in recent) / len(recent)
-                utilization[bus_id] = avg_util
-
-        # 2. Identify underused buses (< 20% utilization)
-        underused = [bus_id for bus_id, util in utilization.items()
-                     if util < 0.2 and bus_id not in cooldown_buses]
-
-        # 3. Get current active bus count
-        red_buses = [b for b in bus_states if b.startswith("RedBus")]
-        blue_buses = [b for b in bus_states if b.startswith("BlueBus")]
-        total_active = len(red_buses) + len(blue_buses)
-
-        for bus_id in underused:
-            if total_active >= max_buses:
-                break
-
-            # Decide new route based on imbalance
-            if len(red_buses) > len(blue_buses):
-                new_route = BLUE_ROUTE
-                new_label = "BlueBus"
-            else:
-                new_route = RED_ROUTE
-                new_label = "RedBus"
-
-            new_id = f"{new_label}-Reassigned-{bus_id.split('-')[-1]}"
-            print(f"[{env.now:.1f}] Reassigning {bus_id} → {new_id}")
-
-            try:
-                active_bus_processes[bus_id].interrupt()
-            except:
-                pass  # Already completed
-
-            new_proc = env.process(mothership_bus(env, new_id, new_route, SIM_TIME - env.now))
-            register_bus_process(new_id, new_proc)
-
-            cooldown_buses.add(bus_id)
-
-
-# Financial parameters
-COST_PER_BUS_PER_MINUTE = 0.40     # fuel, maintenance, driver
-COST_PER_ROBOT_DELIVERY = 0.20     # electricity, maintenance
-COST_FIXED_OVERHEAD = 100          # garage, coordination center, per day
-
-REVENUE_PER_PASSENGER = 2.00      # average fare per trip
-REVENUE_PER_PACKAGE = 5.00         # delivery revenue per package
+    yield env.timeout(420)  # 16:00–23:00
 
 
 # === Analysis Functions ===
@@ -468,6 +391,7 @@ def analyze_bus_utilization():
         'average_utilization': avg_utilization * 100,
         'can_board_probability': ((total_observations - full_count) / total_observations) * 100
     }
+
 
 def calculate_financials():
     # Bus operation cost
@@ -506,7 +430,6 @@ def calculate_financials():
     print(f"\n💸 Net profit/loss:            €{net_profit:.2f}")
 
 
-
 def print_comprehensive_report():
     """Print detailed simulation results"""
     print("="*80)
@@ -519,11 +442,6 @@ def print_comprehensive_report():
     print(f"Total passengers served:      {len(served_passengers)}")
     print(f"Total passengers missed:      {len(all_passengers) - len(served_passengers)}")
     print(f"Service rate:                 {len(served_passengers)/len(all_passengers)*100:.1f}%")
-
-    if served_passengers:
-        wait_times = [p['wait_time'] for p in served_passengers if 'wait_time' in p]
-        if wait_times:
-            print(f"Average wait time:            {sum(wait_times)/len(wait_times):.2f} minutes")
 
     # Bus Utilization Analysis
     print("\n--- BUS UTILIZATION ---")
@@ -573,7 +491,7 @@ def print_comprehensive_report():
         missed = len([p for p in remained if p['delivery_stop'] == stop and p['delivery_stop'] != "Broekakkerseweg 26"])
 
         print(f"{stop:<31} | {created:<8} | {delivered:<10} | {missed:<8}")
-    
+
 
 # === Simulation Setup ===
 env = simpy.Environment()
@@ -589,24 +507,8 @@ for stop in RED_BUS_STOPS:
 
 env.process(generate_packages(env))
 
-env.process(bus_reassignment_manager(env, max_buses=6))
-
 # Start schedulers
-# Time-of-day-based intervals (peak: more frequent dispatches)
-interval_schedule_red = {
-    **dict.fromkeys(range(7, 9), 6),
-    **dict.fromkeys(range(16, 18), 6),
-    **dict.fromkeys(range(6, 22), 12)
-}
-
-interval_schedule_blue = {
-    **dict.fromkeys(range(7, 9), 8),
-    **dict.fromkeys(range(16, 18), 8),
-    **dict.fromkeys(range(6, 22), 15)
-}
-
-env.process(bus_dispatcher(env, RED_ROUTE, stop_queues_red_route_forward, "RedBus", "red", BUS_PASSENGER_CAPACITY, interval_schedule_red,4))
-env.process(bus_dispatcher(env, BLUE_ROUTE, stop_queues_blue_route, "BlueBus", "blue", BUS_PASSENGER_CAPACITY, interval_schedule_blue,2))
+env.process(mothership_scheduler(env))
 
 # Run simulation
 env.run(until=SIM_TIME + 60) # One extra hour for buses to drop off the remaining passengers
@@ -616,13 +518,6 @@ env.run(until=SIM_TIME + 60) # One extra hour for buses to drop off the remainin
 package_queues = {**robot_queues_red_route_backward, **robot_queues_blue_route}
 for queue in package_queues.values():
     missed_packages.extend(queue)
-
-num_red_buses = len([bus for bus in bus_states if bus.startswith("RedBus")])
-num_blue_buses = len([bus for bus in bus_states if bus.startswith("BlueBus")])
-print(f"\n--- DISPATCH SUMMARY ---")
-print(f"Red buses dispatched: {num_red_buses}")
-print(f"Blue buses dispatched: {num_blue_buses}")
-print(f"Total buses dispatched: {num_red_buses + num_blue_buses}")
 
 # Run the comprehensive analysis
 print_comprehensive_report()
