@@ -47,8 +47,8 @@ CHANCE_FOR_DELIVERY = 0.8
 COST_PER_BUS_PER_MINUTE = 0.40     # fuel, maintenance, driver
 COST_PER_ROBOT_DELIVERY = 0.20     # electricity, maintenance
 COST_FIXED_OVERHEAD = 100          # garage, coordination center, per day
-REVENUE_PER_PASSENGER = 1.00       # average fare per trip
-REVENUE_PER_PACKAGE = 4.00
+REVENUE_PER_PASSENGER = 2.00       # average fare per trip
+REVENUE_PER_PACKAGE = 5.00
 
 # === Global tracking variables ===
 stop_queues_red_route_forward = {stop["stop"]: deque() for stop in RED_ROUTE}
