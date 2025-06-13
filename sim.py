@@ -349,8 +349,8 @@ def launch_buses(num, label_prefix, run_duration, route_colour):
 
 def mothership_scheduler(env):
     # Initially 4 buses that run all day
-    launch_buses(2, "OffPeak-AM", SIM_TIME + 60, "red")
-    launch_buses(1, "OffPeak-AM", SIM_TIME + 60, "blue")
+    launch_buses(2, "OffPeak-AM", SIM_TIME, "red")
+    launch_buses(1, "OffPeak-AM", SIM_TIME, "blue")
     yield env.timeout(60)  # 06:00 → 07:00
 
     # # Peak hours - launch two more
